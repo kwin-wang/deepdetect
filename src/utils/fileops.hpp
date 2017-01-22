@@ -28,95 +28,92 @@
 #include <sys/stat.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <vector>
+#include <iterator>
+#include <algorithm>
+#include <boost/filesystem.hpp>
+
+namespace fs = boost::filesystem;
 
 namespace dd
 {
+  // TODO(yajun): implement all method using boost::filesystem
+  // which more readable
   class fileops
   {
   public:
 
     static bool file_exists(const std::string &fname)
     {
-      struct stat bstat;
-      return (stat(fname.c_str(),&bstat)==0);
+      return fs::exists(fs::path(fname));
     }
 
     static bool file_exists(const std::string &fname,
 			    bool &directory)
     {
-      struct stat bstat;
-      int r = stat(fname.c_str(),&bstat);
-      if (r != 0)
-	{
-	  directory = false;
-	  return false;
-	}
-      if (S_ISDIR(bstat.st_mode))
-	directory = true;
-      else directory = false;
-      return r == 0; 
+      directory = false;
+      bool ret = false;
+      fs::path p = fs::path(fname);
+      try {
+        if (fs::exists(p)) {
+          directory = fs::is_directory(p);
+          ret = true;
+        }
+      } catch (const fs::filesystem_error& e) {
+        directory = false;
+      }
+      return ret;
     }
     
     static long int file_last_modif(const std::string &fname)
     {
-      struct stat bstat;
-      if (stat(fname.c_str(),&bstat)==0)
-	return bstat.st_mtim.tv_sec;
-      else return -1;
+      try {
+        return fs::last_write_time(fs::path(fname));
+      } catch (const fs::filesystem_error& e) {
+        return -1;
+      }
     }
 
+    // fix issue #119: https://github.com/beniz/deepdetect/issues/119
     static int list_directory(const std::string &repo,
 			      const bool &files,
 			      const bool &dirs,
 			      std::unordered_set<std::string> &lfiles)
     {
-      DIR *dir;
-      struct dirent *ent;
-      if ((dir = opendir(repo.c_str())) != NULL) {
-	while ((ent = readdir(dir)) != NULL) {
-	  if ((files && (ent->d_type == DT_REG || ent->d_type == DT_LNK))
-	      || (dirs && (ent->d_type == DT_DIR || ent->d_type == DT_LNK) && ent->d_name[0] != '.'))
-	    lfiles.insert(std::string(repo) + "/" + std::string(ent->d_name));
-	}
-	closedir(dir);
-	return 0;
-      } 
-      else 
-	{
-	  return 1;
-	}
+      typedef std::vector<fs::path> vec;
+
+      fs::path p = fs::path(repo);
+      try {
+        if(!(fs::exists(p) && fs::is_directory(p)))
+        {
+          return 1;
+        }
+
+        vec v;
+        std::copy_if(fs::directory_iterator(p), fs::directory_iterator(), std::back_inserter(v),
+                     [files, dirs](const fs::path& pp){
+          return (files && fs::is_regular_file(pp)) || (dirs && fs::is_directory(pp));
+        });
+
+        std::transform(v.begin(), v.end(), std::inserter(lfiles, lfiles.begin()), [](const fs::path& pp){
+          return pp.string();
+        });
+
+        return 0;
+      } catch (const fs::filesystem_error& e) {
+        return 1;
+      }
     }
 
     // remove everything, including first level directories within directory
     static int clear_directory(const std::string &repo)
     {
-      int err = 0;
-      DIR *dir;
-      struct dirent *ent;
-      if ((dir = opendir(repo.c_str())) != NULL) {
-	while ((ent = readdir(dir)) != NULL) 
-	  {
-	    if (ent->d_type == DT_DIR && ent->d_name[0] == '.')
-	      continue;
-	    else
-	      {
-		std::string f = std::string(repo) + "/" + std::string(ent->d_name);
-		if (ent->d_type == DT_DIR)
-		  {
-		    int errdf = remove_directory_files(f,std::vector<std::string>());
-		    int errd = rmdir(f.c_str());
-		    err += errdf + errd;
-		  }
-		else err += remove(f.c_str());
-	      }
-	  }
-	closedir(dir);
-	return err;
-      } 
-      else 
-	{
-	  return 1;
-	}
+      try {
+        return fs::remove_all(fs::path(repo));
+
+      } catch (const fs::filesystem_error& e) {
+        return 1;
+      }
     }
 
     // empty extensions means a wildcard
@@ -157,28 +154,39 @@ namespace dd
 	}
     }
 
+    // Note: the synopsis of copy_file has been changed.
+    // the old synopsis is:
+    //    it will return 1 if the fin cannot be open
+    //    it will return 2 if the fout cannot be open
+    //    it will return 0 if successfully invoke this function
+    // yajun 2017/01/22
     static int copy_file(const std::string &fin,
 			 const std::string &fout)
     {
-      std::ifstream src(fin,std::ios::binary);
-      if (!src.is_open())
-	return 1;
-      std::ofstream dst(fout,std::ios::binary);
-      if (!dst.is_open())
-	return 2;
-      dst << src.rdbuf();
-      src.close();
-      dst.close();
-      return 0;
+      auto p_in = fs::path(fin);
+      auto p_out = fs::path(fout);
+      try {
+        if (fs::is_directory(p_in)) {
+          return 1;
+        }
+
+        fs::copy(fs::path(fin), fs::path(fout));
+        return 0;
+      } catch (const fs::filesystem_error& e) {
+        return 1;
+      }
     }
 
     static int remove_file(const std::string &repo,
 			   const std::string &f)
     {
-      std::string fn = repo + "/" + f;
-      if (remove(fn.c_str()))
-	return -1; // error.
-      return 0;
+      try {
+        auto full_path = fs::path(repo) / fs::path(f);
+        fs::remove(full_path);
+        return 0;
+      } catch (const fs::filesystem_error& e) {
+        return -1;
+      }
     }
     
   };
